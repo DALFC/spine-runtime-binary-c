@@ -10,25 +10,32 @@
 #include <math.h>
 #include <float.h>
 typedef enum {
-	SP_CURVE_LINEAR,
-	SP_CURVE_STEPPED,
-	SP_CURVE_BEZIER,
+    SP_CURVE_LINEAR,
+    SP_CURVE_STEPPED,
+    SP_CURVE_BEZIER,
 } spCurveType;
 
 typedef struct {
-	spSkeletonBinary super;
-	int ownsLoader;
+    spSkeletonBinary super;
+    int ownsLoader;
 } _spSkeletonBinary;
 
 #define MIN(a, b) (((a)<(b))?(a):(b))
 #define MAX(a, b) (((a)>(b))?(a):(b))
 #define READ() (((int)*self->reader++) & 0xFF)
+#define READSAFE() (((int)*self->reader) & 0xFF)
 
 #define inline __inline
 
 static inline int readBoolean(spSkeletonBinary *self)
 {
     int ch = READ();
+    return ch != 0;
+}
+
+static inline int readBooleanSafe(spSkeletonBinary *self)
+{
+    int ch = READSAFE();
     return ch != 0;
 }
 
@@ -56,25 +63,35 @@ static inline int readInt(spSkeletonBinary *self)
 
 static inline int readIntOptimize(spSkeletonBinary *self)
 {
-	int b = READ();
-	int result = (b) & 0x7F;
-	if ((b & 0x80) != 0) {
-		b = READ();
-		result = result | ((b & 0x7F) << 7);
-		if ((b & 0x80) != 0) {
-			b=READ();
-			result=result | ((b & 0x7F) << 14);
-			if ((b & 0x80) != 0) {
-				b=READ();
-				result=result | ((b & 0x7F) << 21);
-				if ((b & 0x80) != 0) {
-					b=READ();
-					result=result | ((b & 0x7F) << 28);
-				}
-			}
-		}
-	}
-	return  result;
+    int b = READ();
+    int result = (b) & 0x7F;
+    if ((b & 0x80) != 0) {
+        b = READ();
+        result = result | ((b & 0x7F) << 7);
+        if ((b & 0x80) != 0) {
+            b=READ();
+            result=result | ((b & 0x7F) << 14);
+            if ((b & 0x80) != 0) {
+                b=READ();
+                result=result | ((b & 0x7F) << 21);
+                if ((b & 0x80) != 0) {
+                    b=READ();
+                    result=result | ((b & 0x7F) << 28);
+                }
+            }
+        }
+    }
+    return  result;
+}
+
+static inline int* readIntArray(spSkeletonBinary *self)
+{
+    int n = readIntOptimize(self);
+    int* array = MALLOC(int, n);
+    for (int i = 0; i < n; ++i) {
+        array[i] = readIntOptimize(self);
+    }
+    return array;
 }
 
 static inline float readFloat(spSkeletonBinary *self)
@@ -86,10 +103,10 @@ static inline float readFloat(spSkeletonBinary *self)
 
     u.i = readInt(self);
     
-	if (u.f<=DBL_MAX&&u.f>=-DBL_MAX)
-	{
-		return u.f;
-	}
+    if (u.f<=DBL_MAX&&u.f>=-DBL_MAX)
+    {
+        return u.f;
+    }
 //     if (isinf(u.f)) {
 //         printf("%d to float is inf \n", u.i);
 //         return 1.0;
@@ -126,19 +143,19 @@ static inline float readFloat(spSkeletonBinary *self)
 static inline const char *readString(spSkeletonBinary *self)
 {
     int length, i;
-	char* pszContent;
+    char* pszContent;
 
-	length = readIntOptimize(self);
-	
-	if ( length == 0 ) return NULL;
-	pszContent = MALLOC(char, length);
+    length = readIntOptimize(self);
+    
+    if ( length == 0 ) return NULL;
+    pszContent = MALLOC(char, length);
     for (i = 0; i < length - 1; i ++) {
         pszContent[i] = readChar(self);
     }
     pszContent[length - 1] = '\0';
     
     if (self->cacheIndex >= 1024 * 5) {
-        printf("cache is full !!!!!!!");
+        printf("Cache is full (readString)\n");
         return "";
     }
     self->cache[self->cacheIndex ++] = pszContent;
@@ -184,15 +201,15 @@ static inline void readColor(spSkeletonBinary *self, float *r, float *g, float *
     *a = READ() / (float)255;
 }
 
-static spAttachment *readAttachment(spSkeletonBinary *self, spSkin *Skin, const char *attachmentName)
+static spAttachment *readAttachment(spSkeletonBinary *self, spSkin *Skin, const char *attachmentName, int nonessential)
 {
-    int attachmentType;
+    int attachmentType = 4;
     float scale = self->scale;
     const char *name = readString(self); 
     if (name == NULL) name = attachmentName;
     
-    
-    switch (readChar(self)) {
+    attachmentType = readChar(self);
+    switch (attachmentType) {
         case 0:
             attachmentType = SP_ATTACHMENT_REGION;
             break;
@@ -205,9 +222,8 @@ static spAttachment *readAttachment(spSkeletonBinary *self, spSkin *Skin, const 
         case 3:
             attachmentType = SP_ATTACHMENT_SKINNED_MESH;
             break;
-            
         default:
-            printf("unknow attachment type : -----------");
+            printf("Unknow attachment type: %i\n", attachmentType);
             break;
     }
 
@@ -241,7 +257,7 @@ static spAttachment *readAttachment(spSkeletonBinary *self, spSkin *Skin, const 
         case SP_ATTACHMENT_BOUNDING_BOX: 
         {
             size_t length;
-			spBoundingBoxAttachment *box;
+            spBoundingBoxAttachment *box;
 
             spAttachment *attachment = spAttachmentLoader_newAttachment(self->attachmentLoader,
                 Skin, SP_ATTACHMENT_BOUNDING_BOX, attachmentName, NULL);
@@ -280,7 +296,11 @@ static spAttachment *readAttachment(spSkeletonBinary *self, spSkin *Skin, const 
             mesh->hullLength = readIntOptimize(self) * 2;
 
             spMeshAttachment_updateUVs(mesh);
-			 
+            if (nonessential) {
+                free(readIntArray(self));
+                readFloat(self);
+                readFloat(self);
+            }
             return SUPER_CAST(spAttachment, mesh);
         }
         case SP_ATTACHMENT_SKINNED_MESH: 
@@ -344,7 +364,11 @@ static spAttachment *readAttachment(spSkeletonBinary *self, spSkin *Skin, const 
             mesh->hullLength = readIntOptimize(self) * 2;
 
             spSkinnedMeshAttachment_updateUVs(mesh);
-
+            if (nonessential) {
+                free(readIntArray(self));
+                readFloat(self);
+                readFloat(self);
+            }
             return SUPER_CAST(spAttachment, mesh);
         }
     }
@@ -352,7 +376,7 @@ static spAttachment *readAttachment(spSkeletonBinary *self, spSkin *Skin, const 
     return NULL;
 }
 
-static spSkin *readSkin(spSkeletonBinary *self, const char *skinName, int *nonessential)
+static spSkin *readSkin(spSkeletonBinary *self, const char *skinName, int nonessential)
 {
     spSkin *skin;
     int i;
@@ -367,7 +391,7 @@ static spSkin *readSkin(spSkeletonBinary *self, const char *skinName, int *nones
         for (ii = 0, nn = readIntOptimize(self); ii < nn; ii++)
         {
             const char *name = readString(self);
-            spSkin_addAttachment(skin, slotIndex, name, readAttachment(self, skin, name));
+            spSkin_addAttachment(skin, slotIndex, name, readAttachment(self, skin, name, nonessential));
         }
     }
 
@@ -533,7 +557,7 @@ static void readAnimation(spSkeletonBinary *self, spSkeletonData *skeletonData, 
                 }
                 default:
                 {
-                    printf("unknow timelineType :%d", timelineType);
+                    printf("Unknow timelineType: %d\n", timelineType);
                 }
                     break;
             }
@@ -617,7 +641,7 @@ static void readAnimation(spSkeletonBinary *self, spSkeletonData *skeletonData, 
                         int v,start;
                         frameVertices = tempVertices;
                         start = readIntOptimize(self);
-						memset(frameVertices, 0, sizeof(float) * start);
+                        memset(frameVertices, 0, sizeof(float) * start);
                         end += start;
                         if (scale == 1)
                         {
@@ -637,7 +661,7 @@ static void readAnimation(spSkeletonBinary *self, spSkeletonData *skeletonData, 
                             {
                                 frameVertices[v] += meshVertices[v];
                                 if (frameVertices[v] > 1000 || frameVertices[v] < - 1000) {
-                                    printf("note vertice %f \n", frameVertices[v]);
+                                    //printf("note vertice %f \n", frameVertices[v]);
                                     frameVertices[v] = meshVertices[v];
                                 }
                             }
@@ -719,148 +743,151 @@ static void readAnimation(spSkeletonBinary *self, spSkeletonData *skeletonData, 
 
 spSkeletonBinary* spSkeletonBinary_createWithLoader (spAttachmentLoader* attachmentLoader)
 {
-	spSkeletonBinary* self = SUPER(NEW(_spSkeletonBinary));
-	self->scale = 1;
-	self->attachmentLoader = attachmentLoader;
-	return self;
+    spSkeletonBinary* self = SUPER(NEW(_spSkeletonBinary));
+    self->scale = 1;
+    self->attachmentLoader = attachmentLoader;
+    return self;
 }
 
 spSkeletonBinary* spSkeletonBinary_create(spAtlas* atlas)
 {
-	spAtlasAttachmentLoader* attachmentLoader = spAtlasAttachmentLoader_create(atlas);
-	spSkeletonBinary* self = spSkeletonBinary_createWithLoader(SUPER(attachmentLoader));
-	SUB_CAST(_spSkeletonBinary, self)->ownsLoader = 1;
-	return self;
+    spAtlasAttachmentLoader* attachmentLoader = spAtlasAttachmentLoader_create(atlas);
+    spSkeletonBinary* self = spSkeletonBinary_createWithLoader(SUPER(attachmentLoader));
+    SUB_CAST(_spSkeletonBinary, self)->ownsLoader = 1;
+    return self;
 }
 
 spSkeletonData* spSkeletonBinary_readSkeletonData( spSkeletonBinary* self )
 {
-	int size, i, nonessential;
-	const char* buff;
-	spSkeletonData *skeletonData;
-	float scale = self->scale;
-	spSkin *defaultSkin;
+    int size, i, nonessential;
+    const char* buff;
+    spSkeletonData *skeletonData;
+    float scale = self->scale;
+    spSkin *defaultSkin;
 
-	skeletonData = spSkeletonData_create();
+    skeletonData = spSkeletonData_create();
 
-	// Header
-	if ((buff = readString(self)) != NULL) 
-		MALLOC_STR(skeletonData->hash, buff);
-	if ((buff = readString(self)) != NULL) 
-		MALLOC_STR(skeletonData->version, buff);
-	skeletonData->width = readFloat(self);
-	skeletonData->height = readFloat(self);
-	
-	nonessential = readBoolean(self);
-	if (nonessential)
-	{
+    // Header
+    if ((buff = readString(self)) != NULL) 
+        MALLOC_STR(skeletonData->hash, buff);
+    if ((buff = readString(self)) != NULL)
+        MALLOC_STR(skeletonData->version, buff);
+    skeletonData->width = readFloat(self);
+    skeletonData->height = readFloat(self);
+    
+    nonessential = readBoolean(self);
+    if (nonessential)
+    {
+        readString(self);
+    }
+    // Bones
+    skeletonData->bonesCount = readIntOptimize(self);
+    skeletonData->bones = MALLOC(spBoneData *, skeletonData->bonesCount);
+    for (i = 0; i < skeletonData->bonesCount; i++)
+    {
+        spBoneData *parent = NULL;
+        spBoneData *boneData;
+        int parentIndex;
+        const char *name; 
+        
+        name = readString(self);
+        parentIndex = readIntOptimize(self) - 1;
+        if (parentIndex != -1) parent = skeletonData->bones[parentIndex];
+        boneData = spBoneData_create(name, parent);
+        boneData->x = readFloat(self) * scale;
+        boneData->y = readFloat(self) * scale;
+        boneData->scaleX = readFloat(self);
+        boneData->scaleY = readFloat(self);
+        boneData->rotation = readFloat(self);
+        boneData->length = readFloat(self) * scale;
+        boneData->flipX = readBoolean(self);
+        boneData->flipY = readBoolean(self);
+        boneData->inheritScale = readBoolean(self);
+        boneData->inheritRotation = readBoolean(self);
+        skeletonData->bones[i] = boneData;
+        if (nonessential)
+        {
+            readInt(self);
+            //Color.rgba8888ToColor(boneData.color, input.readInt());
+        }
+        //++skeletonData->bonesCount;
+    }
 
-	}
-	// Bones
-	size = readIntOptimize(self);
-	skeletonData->bones = MALLOC(spBoneData *, size);
-	for (i = 0; i < size; i++)
-	{
-		spBoneData *parent = NULL;
-		spBoneData *boneData;
-		int parentIndex;
-		const char *name; 
-		
-		name = readString(self);
-//		printf("bone name : %s\n", name);
-		parentIndex = readIntOptimize(self) - 1;
-		if (parentIndex != -1) parent = skeletonData->bones[parentIndex];
-		boneData = spBoneData_create(name, parent);
-		boneData->x = readFloat(self) * scale;
-		boneData->y = readFloat(self) * scale;
-		boneData->scaleX = readFloat(self);
-		boneData->scaleY = readFloat(self);
-		boneData->rotation = readFloat(self);
-		boneData->length = readFloat(self) * scale;
-		boneData->flipX = readBoolean(self);
-		boneData->flipY = readBoolean(self);
-		boneData->inheritScale = readBoolean(self);
-		boneData->inheritRotation = readBoolean(self);
-		skeletonData->bones[i] = boneData;
-		if (nonessential)
-		{
-			//Color.rgba8888ToColor(boneData.color, input.readInt());
-		}
-		++skeletonData->bonesCount;
-	}
+    //ik
+    skeletonData->ikConstraintsCount = readIntOptimize(self);
+    skeletonData->ikConstraints = MALLOC(spIkConstraintData *, skeletonData->ikConstraintsCount);
+    for (i = 0; i < skeletonData->ikConstraintsCount; i++)
+    {
+        spIkConstraintData *ik = spIkConstraintData_create(readString(self));
+        int bonesCount = readIntOptimize(self);
+        ik->bonesCount = bonesCount;
+        ik->bones = MALLOC(spBoneData *, ik->bonesCount);
+        for (int n = 0; n < ik->bonesCount; n++)
+        {
+            ik->bones[n] = skeletonData->bones[readIntOptimize(self)];
+        }
+        ik->target = skeletonData->bones[readIntOptimize(self)];
+        ik->mix = readFloat(self);
+        ik->bendDirection =  READ() == 1 ? 1 : -1;
+        skeletonData->ikConstraints[i] = ik;
+    }
 
-	//ik
-	size = readIntOptimize(self);
-	skeletonData->ikConstraints = MALLOC(spIkConstraintData *, size);
-	for (i = 0; i < size; i++)
-	{
-		int n;
-		spIkConstraintData *ik = spIkConstraintData_create(readString(self));
-		int boneCount = readIntOptimize(self);
-//        printf("ik : %d\n", boneCount);
-		ik->bones = MALLOC(spBoneData *, boneCount);
-		for (n = 0; n < boneCount; n++)
-		{
-			ik->bones[ik->bonesCount ++] = skeletonData->bones[readIntOptimize(self)];
-//            printf("ik bone name : %s\n", ik->bones[n]->name);
-		}
-		ik->target = skeletonData->bones[readIntOptimize(self)];
-		ik->mix = readFloat(self);
-		ik->bendDirection =  READ() == 1 ? 1 : -1;
-        skeletonData->ikConstraints[skeletonData->ikConstraintsCount ++] = ik;
-	}
+    // Slots
+    size = readIntOptimize(self);
+    if (size > 0)
+    {
+        skeletonData->slots = MALLOC(spSlotData *, size);
+        for (i = 0; i < size; i++) {
+            const char *attachment;
+            spBoneData *boneData;
+            spSlotData *slotData;
 
-	// Slots
-	size = readIntOptimize(self);
-	if (size > 0)
-	{
-		skeletonData->slots = MALLOC(spSlotData *, size);
-		for (i = 0; i < size; i++) {
-			const char *attachment;
-			spBoneData *boneData;
-			spSlotData *slotData;
+            const char *name = readString(self);
+            boneData = skeletonData->bones[readIntOptimize(self)];
+            slotData = spSlotData_create(name, boneData);
+            readColor(self, &slotData->r, &slotData->g, &slotData->b, &slotData->a);
+            attachment = readString(self);
+            if (attachment) spSlotData_setAttachmentName(slotData, attachment);
 
-			const char *name = readString(self);
-			boneData = skeletonData->bones[readIntOptimize(self)];
-			slotData = spSlotData_create(name, boneData);
-			readColor(self, &slotData->r, &slotData->g, &slotData->b, &slotData->a);
-			attachment = readString(self);
-			if (attachment) spSlotData_setAttachmentName(slotData, attachment);
+            if (readBooleanSafe(self))
+            {
+                slotData->blendMode = (spBlendMode)1; 
+                READ();
+            }
+            else slotData->blendMode = (spBlendMode)READ();
 
-			slotData->blendMode = (spBlendMode)READ();
-
-			skeletonData->slots[i] = slotData;
-			++skeletonData->slotsCount;
-		}
-	}
+            skeletonData->slots[i] = slotData;
+            ++skeletonData->slotsCount;
+        }
+    }
     
     // Default skin
-    defaultSkin = readSkin(self, "default", &nonessential);
+    defaultSkin = readSkin(self, "default", nonessential);
     if (defaultSkin != NULL)
     {
         skeletonData->defaultSkin = defaultSkin;
         skeletonData->skinsCount ++;
     }
     
-	// user skin
-	size = readIntOptimize(self);
+    // user skin
+    size = readIntOptimize(self);
     
-	// Skins
-	if (size > 0)
-	{
-		skeletonData->skins = MALLOC(spSkin *, size + skeletonData->skinsCount);
+    // Skins
+    if (size > 0)
+    {
+        skeletonData->skins = MALLOC(spSkin *, size + skeletonData->skinsCount);
         if (defaultSkin != NULL)
         {
             skeletonData->skins[0] = defaultSkin;
         }
 
         for (i = skeletonData->skinsCount; i < size + skeletonData->skinsCount; i++)
-		{
-			const char *name = readString(self);
-			spSkin *skin = readSkin(self, name, &nonessential);
-			skeletonData->skins[skeletonData->skinsCount] = skin;
-			++skeletonData->skinsCount;
-		}
+        {
+            const char *name = readString(self);
+            spSkin *skin = readSkin(self, name, nonessential);
+            skeletonData->skins[skeletonData->skinsCount] = skin;
+            ++skeletonData->skinsCount;
+        }
     }
     else
     {
@@ -871,60 +898,60 @@ spSkeletonData* spSkeletonBinary_readSkeletonData( spSkeletonBinary* self )
         }
     }
 
-	// Events
-	size = readIntOptimize(self);
-	if (size > 0)
-	{
-		const char *stringValue;
-		skeletonData->events = MALLOC(spEventData *, size);
-		for (i = 0; i < size; i++)
-		{
-			spEventData *eventData = spEventData_create(readString(self));
-			eventData->intValue = readIntOptimize(self);
-			eventData->floatValue = readFloat(self);
-			stringValue = readString(self);
-			if (stringValue) MALLOC_STR(eventData->stringValue, stringValue);
-			skeletonData->events[skeletonData->eventsCount++] = eventData;
-		}
-	}
+    // Events
+    size = readIntOptimize(self);
+    if (size > 0)
+    {
+        const char *stringValue;
+        skeletonData->events = MALLOC(spEventData *, size);
+        for (i = 0; i < size; i++)
+        {
+            spEventData *eventData = spEventData_create(readString(self));
+            eventData->intValue = readIntOptimize(self);
+            eventData->floatValue = readFloat(self);
+            stringValue = readString(self);
+            if (stringValue) MALLOC_STR(eventData->stringValue, stringValue);
+            skeletonData->events[skeletonData->eventsCount++] = eventData;
+        }
+    }
 
-	// Animations
-	size = readIntOptimize(self);
-	if (size > 0)
-	{
-		skeletonData->animations = MALLOC(spAnimation *, size);
-		for (i = 0; i < size; i++)
-		{
-			const char *name = readString(self);
-			readAnimation(self, skeletonData, name);
-		}
-	}
+    // Animations
+    size = readIntOptimize(self);
+    if (size > 0)
+    {
+        skeletonData->animations = MALLOC(spAnimation *, size);
+        for (i = 0; i < size; i++)
+        {
+            const char *name = readString(self);
+            readAnimation(self, skeletonData, name);
+        }
+    }
 
-	return skeletonData;
+    return skeletonData;
 }
 
 spSkeletonData *spSkeletonBinary_readSkeletonDataFile(spSkeletonBinary* self, const char * path)
 {
-	int length;
-	spSkeletonData* skeletonData;
+    int length;
+    spSkeletonData* skeletonData;
 
-	self->rawdata = _spUtil_readFile(path, &length);
-	self->reader = self->rawdata;
+    self->rawdata = _spUtil_readFile(path, &length);
+    self->reader = self->rawdata;
     self->cache = (char**)malloc(sizeof(char*) * 1024 * 5);
     self->cacheIndex = 0;
-	if (!self->reader) {
-		return 0;
-	}
+    if (!self->reader) {
+        return 0;
+    }
 
-	skeletonData = spSkeletonBinary_readSkeletonData(self);
-	
+    skeletonData = spSkeletonBinary_readSkeletonData(self);
+    
     FREE(self->cache);
-	FREE(self->rawdata);
-	return skeletonData;
+    FREE(self->rawdata);
+    return skeletonData;
 }
 
 void spSkeletonBinary_dispose (spSkeletonBinary* self)
 {
-	if (SUB_CAST(_spSkeletonBinary, self)->ownsLoader) spAttachmentLoader_dispose(self->attachmentLoader);
-	FREE(self);
+    if (SUB_CAST(_spSkeletonBinary, self)->ownsLoader) spAttachmentLoader_dispose(self->attachmentLoader);
+    FREE(self);
 }
